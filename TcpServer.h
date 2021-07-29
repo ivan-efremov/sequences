@@ -7,6 +7,20 @@
 #include <sys/epoll.h>
 #include <memory>
 #include <string>
+#include <map>
+
+
+/**
+ * @short Контекст соединения.
+ */
+struct CtxConnection {
+    std::string         m_strin;
+    std::string         m_strout;
+    bool                isReadyRead() const;  ///< !m_strin.empty()
+    bool                isReadyWrite() const; ///< !m_strout.empty()
+};
+
+typedef std::map<int, CtxConnection>  MapCtxConnection;
 
 
 /**
@@ -25,22 +39,27 @@ public:
     virtual            ~BaseTcpServer();
     virtual void        run();
     virtual void        stop();
-protected:
-    /// Инициализация
+private:
+    /// Работа с сокетами
     void                sockInit();
     void                listenInit();
     void                epollInit();
+    void                doAccept();
+    void                doRead(int a_fd);
+    void                doWrite(int a_fd);
 protected:
     /// Хэндлеры событий
     virtual void        onAccept(int a_fd);
-    virtual void        onRead(int a_fd, const char *a_buf, int a_size);
-    virtual void        onWrite(int a_fd, const char *a_buf, int a_size);
+    virtual void        onRead(int a_fd, const char *a_buf, size_t a_size);
+    virtual void        onWrite(int a_fd, size_t a_size);
     virtual void        onClose(int a_fd);
 protected:
+    static void         syserror(const std::string& a_errmsg);
     static void         setNonBlocking(int a_fd);
 protected:
     std::string         m_address;
     std::string         m_port;
+    MapCtxConnection    m_context;
     struct epoll_event  m_event;
     struct epoll_event *m_events;
     int                 m_sfd;
@@ -60,8 +79,8 @@ public:
                                   const std::string& a_port);
 protected:
     virtual void        onAccept(int a_fd);
-    virtual void        onRead(int a_fd, const char *a_buf, int a_size);
-    virtual void        onWrite(int a_fd, const char *a_buf, int a_size);
+    virtual void        onRead(int a_fd, const char *a_buf, size_t a_size);
+    virtual void        onWrite(int a_fd, size_t a_size);
     virtual void        onClose(int a_fd);
 };
 

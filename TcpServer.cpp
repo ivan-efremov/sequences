@@ -25,6 +25,7 @@ BaseTcpServer::BaseTcpServer(
 :
     m_address(a_addr),
     m_port(a_port),
+    m_context(),
     m_event(),
     m_events(nullptr),
     m_sfd(-1),
@@ -57,36 +58,28 @@ void BaseTcpServer::sockInit()
 
     int err = getaddrinfo(m_address.c_str(), m_port.c_str(), &addr, &res);
     if(err != 0) {
-        std::string errmsg("getaddrinfo: ");
-        errmsg += gai_strerror(err);
-        throw std::runtime_error(errmsg);
+        syserror("getaddrinfo");
     }
      
     m_sfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if(m_sfd == -1) {
-        std::string errmsg("socket: ");
-        errmsg += strerror(errno);
         freeaddrinfo(res);
-        throw std::runtime_error(errmsg);
+        syserror("socket");
     }
 
     int yes = 1;
     if(setsockopt(m_sfd, SOL_SOCKET, SO_REUSEPORT, &yes, sizeof(yes)) == -1) {
-        std::string errmsg("setsockopt: ");
-        errmsg += strerror(errno);
         close(m_sfd);
         m_sfd = -1;
         freeaddrinfo(res);
-        throw std::runtime_error(errmsg);
+        syserror("setsockopt");
     }
 
     if(bind(m_sfd, res->ai_addr, res->ai_addrlen) == -1) {
-        std::string errmsg("bind: ");
-        errmsg += strerror(errno);
         close(m_sfd);
         m_sfd = -1;
         freeaddrinfo(res);
-        throw std::runtime_error(errmsg);
+        syserror("bind");
     }
     freeaddrinfo(res);
 }
@@ -99,18 +92,24 @@ void BaseTcpServer::setNonBlocking(int a_fd)
     }
     flags |= O_NONBLOCK;
     if(fcntl(a_fd, F_SETFL, flags) == -1) {
-        std::string errmsg("fcntl: ");
-        errmsg += strerror(errno);
-        throw std::runtime_error(errmsg);
+        syserror("fcntl");
     }
+}
+
+void BaseTcpServer::syserror(const std::string& a_errmsg)
+{
+    std::string errmsg(a_errmsg);
+    errmsg += ": ";
+    errmsg += std::to_string(errno);
+    errmsg += ": ";
+    errmsg += strerror(errno);
+    throw std::runtime_error(errmsg);
 }
 
 void BaseTcpServer::listenInit()
 {
     if(listen(m_sfd, 10000) == -1) {
-        std::string errmsg("listen: ");
-        errmsg += strerror(errno);
-        throw std::runtime_error(errmsg);
+        syserror("listen");
     }
 }
 
@@ -118,23 +117,98 @@ void BaseTcpServer::epollInit()
 {
     m_efd = epoll_create1(0);
     if(m_efd == -1) {
-        std::string errmsg("epoll_create1: ");
-        errmsg += strerror(errno);
-        throw std::runtime_error(errmsg);
+        syserror("epoll_create1");
     }
     
     m_event.data.fd = m_sfd;
     m_event.events = EPOLLIN | EPOLLET;
     
     if(epoll_ctl(m_efd, EPOLL_CTL_ADD, m_sfd, &m_event) == -1) {
-        std::string errmsg("epoll_ctl: ");
-        errmsg += strerror(errno);
-        throw std::runtime_error(errmsg);
+        syserror("epoll_ctl: EPOLL_CTL_ADD");
     }
 
     m_events = (epoll_event*) calloc(MAXEVENTS, sizeof(m_event));
     if(m_events == nullptr) {
-        throw std::runtime_error("m_events: out of memory");
+        syserror("m_events: out of memory");
+    }
+}
+
+void BaseTcpServer::doAccept()
+{
+    struct sockaddr client;
+    socklen_t clientlen = sizeof(client);
+    int clientfd = accept(m_sfd, &client, &clientlen);
+    if(clientfd == -1) {
+        if(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            ///< соединение еще не установлено
+            return;
+        } else {
+            syserror("accept");
+        }
+    }
+    setNonBlocking(clientfd);
+    onAccept(clientfd);
+    m_event.data.fd = clientfd;
+    m_event.events = EPOLLIN | EPOLLET;
+    if(epoll_ctl(m_efd, EPOLL_CTL_ADD, clientfd, &m_event) == -1) {
+        syserror("epoll_ctl: EPOLL_CTL_ADD");
+    }
+}
+
+void BaseTcpServer::doRead(int a_fd)
+{
+    char buf[BUFFERSIZE];
+    int err = 0;
+    while(1) {
+        ssize_t count = read(a_fd, buf, sizeof(buf));
+        if(count == -1) {
+            if(errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                err = 1;
+            }
+            break;
+        } else if(count == 0) {
+            err = 1;
+            break;
+        }
+        buf[count] = 0;
+        onRead(a_fd, buf, count);
+    }
+    if(err) {
+        onClose(a_fd);
+        epoll_ctl(m_efd, EPOLL_CTL_DEL, a_fd, &m_event);
+        close(a_fd);
+    } else if(!m_context.at(a_fd).m_strout.empty()) {
+        m_event.data.fd = a_fd;
+        m_event.events = EPOLLIN | EPOLLOUT | EPOLLET;
+        epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &m_event);
+    }
+}
+
+void BaseTcpServer::doWrite(int a_fd)
+{
+    auto &strout = m_context.at(a_fd).m_strout;
+    int err = 0;
+    while(!strout.empty()) {
+        ssize_t count = write(a_fd, strout.data(), strout.size());
+        if(count == -1) {
+            if(errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                err = 1;
+            }
+            break;
+        } else if(count == 0) {
+            err = 1;
+            break;
+        }
+        onWrite(a_fd, count);
+    }
+    if(err) {
+        onClose(a_fd);
+        epoll_ctl(m_efd, EPOLL_CTL_DEL, a_fd, &m_event);
+        close(a_fd);
+    } else if(strout.empty()) {
+        m_event.data.fd = a_fd;
+        m_event.events = EPOLLIN | EPOLLET;
+        epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &m_event);
     }
 }
 
@@ -147,67 +221,27 @@ void BaseTcpServer::run()
     while(m_running) try {
         int n = epoll_wait(m_efd, m_events, MAXEVENTS, -1);
         if(n == -1 && errno != EINTR) {
-            std::string errmsg("epoll_wait: ");
-            errmsg += strerror(errno);
-            throw std::runtime_error(errmsg);
+            syserror("epoll_wait");
         }
         for(int i = 0; i < n; ++i) {
-            int eventfd = m_events[i].data.fd;
-            if((m_events[i].events & EPOLLERR) ||
-               (m_events[i].events & EPOLLHUP) ||
-               (!(m_events[i].events & EPOLLIN)))
-            {
+            const uint32_t events = m_events[i].events;
+            const int eventfd = m_events[i].data.fd;
+            if(events & (EPOLLERR | EPOLLHUP)) {
                 onClose(eventfd);
+                epoll_ctl(m_efd, EPOLL_CTL_DEL, eventfd, &m_event);
                 close(eventfd);
                 continue;
+            } else if(events & EPOLLIN) {
+                if(eventfd == m_sfd) {
+                    doAccept();
+                } else {
+                    doRead(eventfd);
+                }
+            } else if(events & EPOLLOUT) {
+                doWrite(eventfd);
+            } else {
+                std::cout << "Untreated event: " << events << std::endl;
             }
-            else if(m_sfd == eventfd)
-            {
-                struct sockaddr client;
-                socklen_t clientlen = sizeof(client);
-                int clientfd = accept(m_sfd, &client, &clientlen);
-                if(clientfd == -1) {
-                    if(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-                        continue;
-                    } else {
-                        std::string errmsg("accept: ");
-                        errmsg += strerror(errno);
-                        throw std::runtime_error(errmsg);
-                    }
-                }
-                setNonBlocking(clientfd);
-                onAccept(clientfd);
-                m_event.data.fd = clientfd;
-                m_event.events = EPOLLIN | EPOLLET;
-                if(epoll_ctl(m_efd, EPOLL_CTL_ADD, clientfd, &m_event) == -1) {
-                    std::string errmsg("epoll_ctl: ");
-                    errmsg += strerror(errno);
-                    throw std::runtime_error(errmsg);
-                }
-            }
-            else
-            {
-                int err = 0;
-                while(1) {
-                    char buf[BUFFERSIZE];
-                    ssize_t count = read(eventfd, buf, sizeof(buf));
-                    if(count == -1) {
-                        if(errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-                            err = 1;
-                        }
-                        break;
-                    } else if(count == 0) {
-                        err = 1;
-                        break;
-                    }
-                    buf[count] = 0;
-                    onRead(eventfd, buf, count);
-                }
-                if(err) {
-                    onClose(eventfd);
-                    close(eventfd);
-                }
-            } ///< if
         } ///< for
     } catch(const std::exception& err) { ///< while
         std::cerr << "Loop error: " << err.what() << std::endl;
@@ -223,11 +257,11 @@ void BaseTcpServer::onAccept(int a_fd)
 {
 }
 
-void BaseTcpServer::onRead(int a_fd, const char *a_buf, int a_size)
+void BaseTcpServer::onRead(int a_fd, const char *a_buf, size_t a_size)
 {
 }
 
-void BaseTcpServer::onWrite(int a_fd, const char *a_buf, int a_size)
+void BaseTcpServer::onWrite(int a_fd, size_t a_size)
 {
 }
 
@@ -250,19 +284,35 @@ TcpServer::TcpServer(
 void TcpServer::onAccept(int a_fd)
 {
     std::cout << "onAccept: " << a_fd << std::endl;
+    m_context[a_fd] = CtxConnection();
 }
 
-void TcpServer::onRead(int a_fd, const char *a_buf, int a_size)
+void TcpServer::onRead(int a_fd, const char *a_buf, size_t a_size)
 {
     std::cout << "onRead: " << a_fd << " : " << a_size << std::endl;
+    auto &ctx = m_context.at(a_fd);
+    auto &strin = ctx.m_strin;
+    auto &strout = ctx.m_strout;
+    strin.append(a_buf, a_size);
+    while(1) {
+        size_t n = strin.find('\n');
+        if(n == std::string::npos) {
+            break;
+        }
+        strout += "* " + std::to_string(n) + " *\r\n";
+        strin.erase(0, n + 1);
+    }
 }
 
-void TcpServer::onWrite(int a_fd, const char *a_buf, int a_size)
+void TcpServer::onWrite(int a_fd, size_t a_size)
 {
-    std::cout << "onWrite: " << a_fd << " : " << a_size << std::endl;
+    auto &strout = m_context.at(a_fd).m_strout;
+    std::cout << "onWrite: " << a_fd << " : " << a_size << " : " << strout.size() << std::endl;
+    strout.erase(0, a_size);
 }
 
 void TcpServer::onClose(int a_fd)
 {
     std::cout << "onClose: " << a_fd << std::endl;
+    m_context.erase(a_fd);
 }
