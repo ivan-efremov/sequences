@@ -3,37 +3,25 @@
  */
 
 #include <iostream>
-#include <string>
-#include <vector>
-#include <atomic>
+#include <stdexcept>
+#include <csignal>
+#include "Sequence.h"
+#include "TcpServer.h"
 
 
+static PTcpServer g_server;
 
-class Sequence
+
+static void stop(int a_signal)
 {
-public:
-    Sequence(uint64_t a_start, uint64_t a_step):
-        m_counter(a_start), m_step(a_step)
-    {
+    if(g_server) {
+        g_server->stop();
     }
-    Sequence(Sequence&& a_seq):
-        m_counter(a_seq.m_counter.load()), m_step(a_seq.m_step)
-    {
-    }
-    inline uint64_t next() {
-        return m_counter.fetch_add(m_step, std::memory_order_relaxed);
-    }
-private:
-    std::atomic_uint64_t m_counter;
-    const uint64_t       m_step;
-};
-
-
-std::vector<Sequence> g_sequences;
-
+}
 
 int main(int argc, const char *argv[])
 {
+/*
     g_sequences.emplace_back(1, 2);
     g_sequences.emplace_back(2, 3);
     g_sequences.emplace_back(3, 4);
@@ -44,6 +32,25 @@ int main(int argc, const char *argv[])
                   << g_sequences.at(2).next() << std::endl;
         std::cin.get();
     }
-    
+*/
+    const std::string host = "0.0.0.0";
+    const std::string port = "4000";
+    try {
+        g_server = std::make_shared<TcpServer>(host, port);
+        
+        std::signal(SIGTERM, stop);
+        std::signal(SIGINT,  stop);
+        std::signal(SIGHUP,  stop);
+        std::signal(SIGQUIT, stop);
+        std::signal(SIGPIPE, SIG_IGN);
+        
+        std::cout << "Server is started at "
+                  << host << ':' << port << ".\n"
+                  << "Use CTRL-C to quit." << std::endl;
+        g_server->run();
+    } catch(const std::exception& err) {
+        std::cerr << "Server error: " << err.what() << std::endl;
+    }
+    std::cout << "Shutdown server." << std::endl;
     return 0;
 }
