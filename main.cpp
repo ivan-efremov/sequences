@@ -51,6 +51,6 @@ int main(int argc, const char *argv[])
     } catch(const std::exception& err) {
         std::cerr << "Server error: " << err.what() << std::endl;
     }
-    std::cout << "Shutdown server." << std::endl;
+    std::cout << "\nShutdown server." << std::endl;
     return 0;
 }

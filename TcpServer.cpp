@@ -16,7 +16,10 @@
 #include "TcpServer.h"
 
 
-TcpServer::TcpServer(
+/**
+ * class BaseTcpServer.
+ */
+BaseTcpServer::BaseTcpServer(
     const std::string& a_addr,
     const std::string& a_port)
 :
@@ -30,7 +33,7 @@ TcpServer::TcpServer(
 {
 }
 
-TcpServer::~TcpServer()
+BaseTcpServer::~BaseTcpServer()
 {
     if(m_sfd != -1) {
         close(m_sfd);
@@ -43,7 +46,7 @@ TcpServer::~TcpServer()
     }
 }
 
-void TcpServer::sockInit()
+void BaseTcpServer::sockInit()
 {
     struct addrinfo addr, *res = nullptr;
 
@@ -88,7 +91,7 @@ void TcpServer::sockInit()
     freeaddrinfo(res);
 }
 
-void TcpServer::setNonBlocking(int a_fd)
+void BaseTcpServer::setNonBlocking(int a_fd)
 {
     int flags = fcntl(a_fd, F_GETFL, 0);
     if(flags == -1) {
@@ -102,7 +105,7 @@ void TcpServer::setNonBlocking(int a_fd)
     }
 }
 
-void TcpServer::listenInit()
+void BaseTcpServer::listenInit()
 {
     if(listen(m_sfd, 10000) == -1) {
         std::string errmsg("listen: ");
@@ -111,7 +114,7 @@ void TcpServer::listenInit()
     }
 }
 
-void TcpServer::epollInit()
+void BaseTcpServer::epollInit()
 {
     m_efd = epoll_create1(0);
     if(m_efd == -1) {
@@ -135,7 +138,7 @@ void TcpServer::epollInit()
     }
 }
 
-void TcpServer::run()
+void BaseTcpServer::run()
 {
     sockInit();
     setNonBlocking(m_sfd);
@@ -143,25 +146,26 @@ void TcpServer::run()
     epollInit();
     while(m_running) try {
         int n = epoll_wait(m_efd, m_events, MAXEVENTS, -1);
-        if(n == -1) {
+        if(n == -1 && errno != EINTR) {
             std::string errmsg("epoll_wait: ");
             errmsg += strerror(errno);
             throw std::runtime_error(errmsg);
         }
         for(int i = 0; i < n; ++i) {
+            int eventfd = m_events[i].data.fd;
             if((m_events[i].events & EPOLLERR) ||
                (m_events[i].events & EPOLLHUP) ||
                (!(m_events[i].events & EPOLLIN)))
             {
-                //onClose(m_events[i].data.fd);
-                close(m_events[i].data.fd);
+                onClose(eventfd);
+                close(eventfd);
                 continue;
             }
-            else if(m_sfd == m_events[i].data.fd)
+            else if(m_sfd == eventfd)
             {
                 struct sockaddr client;
-                socklen_t clientLen = sizeof(client);
-                int clientfd = accept(m_sfd, &client, &clientLen);
+                socklen_t clientlen = sizeof(client);
+                int clientfd = accept(m_sfd, &client, &clientlen);
                 if(clientfd == -1) {
                     if(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
                         continue;
@@ -172,7 +176,7 @@ void TcpServer::run()
                     }
                 }
                 setNonBlocking(clientfd);
-                //onAccept(clientfd);
+                onAccept(clientfd);
                 m_event.data.fd = clientfd;
                 m_event.events = EPOLLIN | EPOLLET;
                 if(epoll_ctl(m_efd, EPOLL_CTL_ADD, clientfd, &m_event) == -1) {
@@ -186,7 +190,7 @@ void TcpServer::run()
                 int err = 0;
                 while(1) {
                     char buf[BUFFERSIZE];
-                    ssize_t count = read(m_events[i].data.fd, buf, sizeof(buf));
+                    ssize_t count = read(eventfd, buf, sizeof(buf));
                     if(count == -1) {
                         if(errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
                             err = 1;
@@ -197,11 +201,11 @@ void TcpServer::run()
                         break;
                     }
                     buf[count] = 0;
-                    //onRead(m_events[i].data.fd, buf, count);
+                    onRead(eventfd, buf, count);
                 }
                 if(err) {
-                    //onClose(m_events[i].data.fd);
-                    close(m_events[i].data.fd);
+                    onClose(eventfd);
+                    close(eventfd);
                 }
             } ///< if
         } ///< for
@@ -210,7 +214,55 @@ void TcpServer::run()
     }
 }
 
-void TcpServer::stop()
+void BaseTcpServer::stop()
 {
     m_running = false;
+}
+
+void BaseTcpServer::onAccept(int a_fd)
+{
+}
+
+void BaseTcpServer::onRead(int a_fd, const char *a_buf, int a_size)
+{
+}
+
+void BaseTcpServer::onWrite(int a_fd, const char *a_buf, int a_size)
+{
+}
+
+void BaseTcpServer::onClose(int a_fd)
+{
+}
+
+
+/**
+ * class TcpServer.
+ */
+TcpServer::TcpServer(
+    const std::string& a_addr,
+    const std::string& a_port)
+:
+    BaseTcpServer(a_addr, a_port)
+{
+}
+
+void TcpServer::onAccept(int a_fd)
+{
+    std::cout << "onAccept: " << a_fd << std::endl;
+}
+
+void TcpServer::onRead(int a_fd, const char *a_buf, int a_size)
+{
+    std::cout << "onRead: " << a_fd << " : " << a_size << std::endl;
+}
+
+void TcpServer::onWrite(int a_fd, const char *a_buf, int a_size)
+{
+    std::cout << "onWrite: " << a_fd << " : " << a_size << std::endl;
+}
+
+void TcpServer::onClose(int a_fd)
+{
+    std::cout << "onClose: " << a_fd << std::endl;
 }
