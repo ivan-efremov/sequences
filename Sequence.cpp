@@ -27,11 +27,10 @@ uint64_t Sequence::next()
     return m_counter.fetch_add(m_step, std::memory_order_relaxed);
 }
 
+
 /**
  * class SequenceFactory
  */
-MapPSequence SequenceFactory::s_sequences;
-
 void SequenceFactory::createSeq(const std::string& a_line)
 {
     int seqId = 0;
@@ -48,8 +47,10 @@ void SequenceFactory::createSeq(const std::string& a_line)
     if(step == 0ULL) {
         throw std::runtime_error("Step parameter 'yyyy' not a valid");
     }
+#ifdef DEBUG
     std::cout << "createSeq: " << seqId << ' ' << start << ' ' << step << std::endl;
-    auto res = s_sequences.emplace(
+#endif
+    auto res = m_sequences.emplace(
         seqId, std::make_shared<Sequence>(start, step)
     );
     if(!res.second) {
@@ -61,7 +62,7 @@ std::string SequenceFactory::getOneRowSeq()
 {
     std::string rowseq;
     rowseq.reserve(128);
-    for(auto &vt : s_sequences) {
+    for(auto &vt : m_sequences) {
         PSequence seq(vt.second);
         rowseq += std::to_string(seq->next());
         rowseq += '\t';
@@ -69,7 +70,9 @@ std::string SequenceFactory::getOneRowSeq()
     if(!rowseq.empty()) {
         rowseq.pop_back();
     }
+#ifdef DEBUG
     std::cout << "getOneRowSeq: " << rowseq << std::endl;
     sleep(1);
+#endif
     return rowseq;
 }

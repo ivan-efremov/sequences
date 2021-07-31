@@ -17,11 +17,13 @@
 struct CtxConnection {
     std::string         m_strin;
     std::string         m_strout;
+    SequenceFactory     m_seqFactory;
     bool                m_readyWrite = false;
     bool                m_exportSeq = false;
 };
 
-typedef std::map<int, CtxConnection>  MapCtxConnection;
+typedef std::shared_ptr<CtxConnection>  PCtxConnection;
+typedef std::map<int, PCtxConnection>   MapCtxConnection;
 
 
 /**
@@ -84,8 +86,6 @@ protected:
     virtual void        onRead(int a_fd, const char *a_buf, size_t a_size);
     virtual void        onWrite(int a_fd, size_t a_size);
     virtual void        onClose(int a_fd);
-private:
-    SequenceFactory     m_seqFactory;
 };
 
 typedef std::shared_ptr<TcpServer>  PTcpServer;

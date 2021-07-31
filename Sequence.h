@@ -38,8 +38,8 @@ typedef std::map<int, PSequence>   MapPSequence;
 class SequenceFactory
 {
 public:
-    void                createSeq(const std::string& a_line);
-    std::string         getOneRowSeq();
+    void            createSeq(const std::string& a_line);
+    std::string     getOneRowSeq();
 private:
-    static MapPSequence s_sequences;
+    MapPSequence    m_sequences;
 };

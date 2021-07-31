@@ -34,6 +34,7 @@ int main(int argc, const char *argv[])
         std::cout << "Server is started at "
                   << host << ':' << port << ".\n"
                   << "Use CTRL-C to quit." << std::endl;
+        
         g_server->run();
     } catch(const std::exception& err) {
         std::cerr << "Server error: " << err.what() << std::endl;
