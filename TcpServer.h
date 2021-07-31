@@ -18,8 +18,9 @@ struct CtxConnection {
     std::string         m_strin;
     std::string         m_strout;
     SequenceFactory     m_seqFactory;
-    bool                m_readyWrite = false;
-    bool                m_exportSeq = false;
+    bool                m_readyWrite;
+    bool                m_exportSeq;
+                        CtxConnection();
 };
 
 typedef std::shared_ptr<CtxConnection>  PCtxConnection;

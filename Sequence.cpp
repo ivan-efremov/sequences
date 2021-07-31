@@ -72,7 +72,6 @@ std::string SequenceFactory::getOneRowSeq()
     }
 #ifdef DEBUG
     std::cout << "getOneRowSeq: " << rowseq << std::endl;
-    sleep(1);
 #endif
     return rowseq;
 }

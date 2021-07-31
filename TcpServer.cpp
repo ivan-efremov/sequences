@@ -17,6 +17,18 @@
 
 
 /**
+ * class CtxConnection.
+ */
+CtxConnection::CtxConnection():
+    m_readyWrite(false),
+    m_exportSeq(false)
+{
+    m_strin.reserve(1024);
+    m_strout.reserve(16 * 4096);
+}
+
+
+/**
  * class BaseTcpServer.
  */
 BaseTcpServer::BaseTcpServer(
@@ -157,24 +169,19 @@ void BaseTcpServer::doAccept()
 void BaseTcpServer::doRead(int a_fd)
 {
     char buf[BUFFERSIZE];
-    int err = 0;
-    while(m_running) {
-        ssize_t count = read(a_fd, buf, sizeof(buf));
-        if(count == -1) {
-            if(errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-                err = 1;
-            }
-            break;
-        } else if(count == 0) {
-            err = 1;
-            break;
+    ssize_t count = read(a_fd, buf, sizeof(buf));
+    if(count == -1) {
+        if(errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            doClose(a_fd);
+            return;
         }
-        buf[count] = 0;
-        onRead(a_fd, buf, count);
-    }
-    if(err) {
+    } else if(count == 0) {
         doClose(a_fd);
-    } else if(m_context.at(a_fd)->m_readyWrite) {
+        return;
+    }
+    buf[count] = 0;
+    onRead(a_fd, buf, count);
+    if(m_context.at(a_fd)->m_readyWrite) {
         m_event.data.fd = a_fd;
         m_event.events = EPOLLIN | EPOLLOUT | EPOLLET;
         epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &m_event);
@@ -185,23 +192,20 @@ void BaseTcpServer::doWrite(int a_fd)
 {
     auto &ctx = m_context.at(a_fd);
     auto &strout = ctx->m_strout;
-    int err = 0;
-    while(!strout.empty() && m_running) {
+    if(!strout.empty()) {
         ssize_t count = write(a_fd, strout.data(), strout.size());
         if(count == -1) {
             if(errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-                err = 1;
+                doClose(a_fd);
+                return;
             }
-            break;
         } else if(count == 0) {
-            err = 1;
-            break;
+            doClose(a_fd);
+            return;
         }
         onWrite(a_fd, count);
     }
-    if(err) {
-        doClose(a_fd);
-    } else if(ctx->m_readyWrite) {
+    if(ctx->m_readyWrite) {
         m_event.data.fd = a_fd;
         m_event.events = EPOLLIN | EPOLLOUT | EPOLLET;
         epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &m_event);
@@ -342,12 +346,15 @@ void TcpServer::onWrite(int a_fd, size_t a_size)
 #endif
     strout.erase(0, a_size);
     if(ctx->m_exportSeq) {
-        auto rowseq = ctx->m_seqFactory.getOneRowSeq();
-        if(rowseq.empty()) {
-            ctx->m_exportSeq = false;
-        } else {
-            strout += rowseq;
-            strout += "\r\n";
+        for(int i=0; i<5000; ++i) {
+            auto rowseq = ctx->m_seqFactory.getOneRowSeq();
+            if(rowseq.empty()) {
+                ctx->m_exportSeq = false;
+                break;
+            } else {
+                strout += rowseq;
+                strout += "\r\n";
+            }
         }
     }
     if(strout.empty()) {
