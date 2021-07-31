@@ -140,7 +140,6 @@ void BaseTcpServer::doAccept()
     int clientfd = accept(m_sfd, &client, &clientlen);
     if(clientfd == -1) {
         if(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-            ///< соединение еще не установлено
             return;
         } else {
             syserror("accept");
@@ -174,10 +173,8 @@ void BaseTcpServer::doRead(int a_fd)
         onRead(a_fd, buf, count);
     }
     if(err) {
-        onClose(a_fd);
-        epoll_ctl(m_efd, EPOLL_CTL_DEL, a_fd, &m_event);
-        close(a_fd);
-    } else if(!m_context.at(a_fd).m_strout.empty()) {
+        doClose(a_fd);
+    } else if(m_context.at(a_fd).m_readyWrite) {
         m_event.data.fd = a_fd;
         m_event.events = EPOLLIN | EPOLLOUT | EPOLLET;
         epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &m_event);
@@ -186,7 +183,8 @@ void BaseTcpServer::doRead(int a_fd)
 
 void BaseTcpServer::doWrite(int a_fd)
 {
-    auto &strout = m_context.at(a_fd).m_strout;
+    auto &ctx = m_context.at(a_fd);
+    auto &strout = ctx.m_strout;
     int err = 0;
     while(!strout.empty()) {
         ssize_t count = write(a_fd, strout.data(), strout.size());
@@ -202,14 +200,24 @@ void BaseTcpServer::doWrite(int a_fd)
         onWrite(a_fd, count);
     }
     if(err) {
-        onClose(a_fd);
-        epoll_ctl(m_efd, EPOLL_CTL_DEL, a_fd, &m_event);
-        close(a_fd);
-    } else if(strout.empty()) {
+        doClose(a_fd);
+    } else if(ctx.m_readyWrite) {
+        m_event.data.fd = a_fd;
+        m_event.events = EPOLLIN | EPOLLOUT | EPOLLET;
+        epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &m_event);
+    } else {
         m_event.data.fd = a_fd;
         m_event.events = EPOLLIN | EPOLLET;
         epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &m_event);
     }
+}
+
+void BaseTcpServer::doClose(int a_fd)
+{
+    onClose(a_fd);
+    epoll_ctl(m_efd, EPOLL_CTL_DEL, a_fd, &m_event);
+    shutdown(a_fd, SHUT_RDWR);
+    close(a_fd);
 }
 
 void BaseTcpServer::run()
@@ -219,7 +227,7 @@ void BaseTcpServer::run()
     listenInit();
     epollInit();
     while(m_running) try {
-        int n = epoll_wait(m_efd, m_events, MAXEVENTS, -1);
+        int n = epoll_wait(m_efd, m_events, MAXEVENTS, 500);
         if(n == -1 && errno != EINTR) {
             syserror("epoll_wait");
         }
@@ -227,9 +235,7 @@ void BaseTcpServer::run()
             const uint32_t events = m_events[i].events;
             const int eventfd = m_events[i].data.fd;
             if(events & (EPOLLERR | EPOLLHUP)) {
-                onClose(eventfd);
-                epoll_ctl(m_efd, EPOLL_CTL_DEL, eventfd, &m_event);
-                close(eventfd);
+                doClose(eventfd);
                 continue;
             } else if(events & EPOLLIN) {
                 if(eventfd == m_sfd) {
@@ -240,11 +246,11 @@ void BaseTcpServer::run()
             } else if(events & EPOLLOUT) {
                 doWrite(eventfd);
             } else {
-                std::cout << "Untreated event: " << events << std::endl;
+                std::cout << "Undefined events: " << events << std::endl;
             }
         } ///< for
     } catch(const std::exception& err) { ///< while
-        std::cerr << "Loop error: " << err.what() << std::endl;
+        std::cerr << "Epoll loop error: " << err.what() << std::endl;
     }
 }
 
@@ -299,16 +305,44 @@ void TcpServer::onRead(int a_fd, const char *a_buf, size_t a_size)
         if(n == std::string::npos) {
             break;
         }
-        strout += "* " + std::to_string(n) + " *\r\n";
+        try {
+            const std::string cmd(strin.substr(0, n));
+            if(cmd.compare(0, 3, "seq") == 0) {
+                m_seqFactory.createSeq(cmd);
+                strout += "OK\r\n";
+            } else if(cmd.compare(0, 10, "export seq") == 0) {
+                strout += m_seqFactory.getOneRowSeq();
+                strout += "\r\n";
+                ctx.m_exportSeq = true;
+            } else {
+                throw std::runtime_error("Unknown command");
+            }
+        } catch(const std::exception& err) {
+            strout += "ERR: ";
+            strout += err.what();
+            strout += "\r\n";
+        }
+        ctx.m_readyWrite = true;
         strin.erase(0, n + 1);
     }
 }
 
 void TcpServer::onWrite(int a_fd, size_t a_size)
 {
-    auto &strout = m_context.at(a_fd).m_strout;
+    auto &ctx = m_context.at(a_fd);
+    auto &strout = ctx.m_strout;
     std::cout << "onWrite: " << a_fd << " : " << a_size << " : " << strout.size() << std::endl;
     strout.erase(0, a_size);
+    if(ctx.m_exportSeq) {
+        auto rowseq = m_seqFactory.getOneRowSeq();
+        if(rowseq.empty()) {
+            ctx.m_readyWrite = false;
+            ctx.m_exportSeq = false;
+        } else {
+            strout += rowseq;
+            strout += "\r\n";
+        }
+    }
 }
 
 void TcpServer::onClose(int a_fd)

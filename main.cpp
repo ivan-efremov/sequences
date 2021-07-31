@@ -5,7 +5,6 @@
 #include <iostream>
 #include <stdexcept>
 #include <csignal>
-#include "Sequence.h"
 #include "TcpServer.h"
 
 
@@ -21,18 +20,6 @@ static void stop(int a_signal)
 
 int main(int argc, const char *argv[])
 {
-/*
-    g_sequences.emplace_back(1, 2);
-    g_sequences.emplace_back(2, 3);
-    g_sequences.emplace_back(3, 4);
-    
-    for(;;) {
-        std::cout << g_sequences.at(0).next() << '\t'
-                  << g_sequences.at(1).next() << '\t'
-                  << g_sequences.at(2).next() << std::endl;
-        std::cin.get();
-    }
-*/
     const std::string host = "0.0.0.0";
     const std::string port = "4000";
     try {

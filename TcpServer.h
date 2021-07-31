@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 #include <map>
+#include "Sequence.h"
 
 
 /**
@@ -16,8 +17,8 @@
 struct CtxConnection {
     std::string         m_strin;
     std::string         m_strout;
-    bool                isReadyRead() const;  ///< !m_strin.empty()
-    bool                isReadyWrite() const; ///< !m_strout.empty()
+    bool                m_readyWrite = false;
+    bool                m_exportSeq = false;
 };
 
 typedef std::map<int, CtxConnection>  MapCtxConnection;
@@ -29,8 +30,8 @@ typedef std::map<int, CtxConnection>  MapCtxConnection;
 class BaseTcpServer
 {
     enum {
-        BUFFERSIZE = 1024,
-        MAXEVENTS = 16384
+        BUFFERSIZE      = 1024,
+        MAXEVENTS       = 16384
     };
 public:
     /// Открытые методы
@@ -47,6 +48,7 @@ private:
     void                doAccept();
     void                doRead(int a_fd);
     void                doWrite(int a_fd);
+    void                doClose(int a_fd);
 protected:
     /// Хэндлеры событий
     virtual void        onAccept(int a_fd);
@@ -82,6 +84,8 @@ protected:
     virtual void        onRead(int a_fd, const char *a_buf, size_t a_size);
     virtual void        onWrite(int a_fd, size_t a_size);
     virtual void        onClose(int a_fd);
+private:
+    SequenceFactory     m_seqFactory;
 };
 
 typedef std::shared_ptr<TcpServer>  PTcpServer;
