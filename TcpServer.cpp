@@ -31,6 +31,9 @@ CtxConnection::CtxConnection():
 /**
  * class BaseTcpServer.
  */
+std::mutex BaseTcpServer::s_lock;
+
+
 BaseTcpServer::BaseTcpServer(
     const std::string& a_addr,
     const std::string& a_port)
@@ -38,7 +41,7 @@ BaseTcpServer::BaseTcpServer(
     m_address(a_addr),
     m_port(a_port),
     m_context(),
-    m_event(),
+    m_poolThreads(),
     m_events(nullptr),
     m_sfd(-1),
     m_efd(-1),
@@ -120,26 +123,28 @@ void BaseTcpServer::syserror(const std::string& a_errmsg)
 
 void BaseTcpServer::listenInit()
 {
-    if(listen(m_sfd, 10000) == -1) {
+    if(listen(m_sfd, 1024) == -1) {
         syserror("listen");
     }
 }
 
 void BaseTcpServer::epollInit()
 {
+    struct epoll_event event;
+    
     m_efd = epoll_create1(0);
     if(m_efd == -1) {
         syserror("epoll_create1");
     }
     
-    m_event.data.fd = m_sfd;
-    m_event.events = EPOLLIN | EPOLLET;
+    event.data.fd = m_sfd;
+    event.events = EPOLLIN | EPOLLET;
     
-    if(epoll_ctl(m_efd, EPOLL_CTL_ADD, m_sfd, &m_event) == -1) {
+    if(epoll_ctl(m_efd, EPOLL_CTL_ADD, m_sfd, &event) == -1) {
         syserror("epoll_ctl: EPOLL_CTL_ADD");
     }
 
-    m_events = (epoll_event*) calloc(MAXEVENTS, sizeof(m_event));
+    m_events = (epoll_event*) calloc(MAXEVENTS, sizeof(epoll_event));
     if(m_events == nullptr) {
         syserror("m_events: out of memory");
     }
@@ -147,6 +152,7 @@ void BaseTcpServer::epollInit()
 
 void BaseTcpServer::doAccept()
 {
+    struct epoll_event event;
     struct sockaddr client;
     socklen_t clientlen = sizeof(client);
     int clientfd = accept(m_sfd, &client, &clientlen);
@@ -158,10 +164,11 @@ void BaseTcpServer::doAccept()
         }
     }
     setNonBlocking(clientfd);
+    std::lock_guard<std::mutex> lock(s_lock);
     onAccept(clientfd);
-    m_event.data.fd = clientfd;
-    m_event.events = EPOLLIN | EPOLLET;
-    if(epoll_ctl(m_efd, EPOLL_CTL_ADD, clientfd, &m_event) == -1) {
+    event.data.fd = clientfd;
+    event.events = EPOLLIN | EPOLLET;
+    if(epoll_ctl(m_efd, EPOLL_CTL_ADD, clientfd, &event) == -1) {
         syserror("epoll_ctl: EPOLL_CTL_ADD");
     }
 }
@@ -172,24 +179,30 @@ void BaseTcpServer::doRead(int a_fd)
     ssize_t count = read(a_fd, buf, sizeof(buf));
     if(count == -1) {
         if(errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            std::lock_guard<std::mutex> lock(s_lock);
             doClose(a_fd);
             return;
         }
     } else if(count == 0) {
+        std::lock_guard<std::mutex> lock(s_lock);
         doClose(a_fd);
         return;
     }
     buf[count] = 0;
+    std::lock_guard<std::mutex> lock(s_lock);
     onRead(a_fd, buf, count);
     if(m_context.at(a_fd)->m_readyWrite) {
-        m_event.data.fd = a_fd;
-        m_event.events = EPOLLIN | EPOLLOUT | EPOLLET;
-        epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &m_event);
+        struct epoll_event event;
+        event.data.fd = a_fd;
+        event.events = EPOLLIN | EPOLLOUT | EPOLLET;
+        epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &event);
     }
 }
 
 void BaseTcpServer::doWrite(int a_fd)
 {
+    std::lock_guard<std::mutex> lock(s_lock);
+    struct epoll_event event;
     auto &ctx = m_context.at(a_fd);
     auto &strout = ctx->m_strout;
     if(!strout.empty()) {
@@ -206,20 +219,20 @@ void BaseTcpServer::doWrite(int a_fd)
         onWrite(a_fd, count);
     }
     if(ctx->m_readyWrite) {
-        m_event.data.fd = a_fd;
-        m_event.events = EPOLLIN | EPOLLOUT | EPOLLET;
-        epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &m_event);
+        event.data.fd = a_fd;
+        event.events = EPOLLIN | EPOLLOUT | EPOLLET;
+        epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &event);
     } else {
-        m_event.data.fd = a_fd;
-        m_event.events = EPOLLIN | EPOLLET;
-        epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &m_event);
+        event.data.fd = a_fd;
+        event.events = EPOLLIN | EPOLLET;
+        epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &event);
     }
 }
 
 void BaseTcpServer::doClose(int a_fd)
 {
     onClose(a_fd);
-    epoll_ctl(m_efd, EPOLL_CTL_DEL, a_fd, &m_event);
+    //epoll_ctl(m_efd, EPOLL_CTL_DEL, a_fd, nullptr);
     shutdown(a_fd, SHUT_RDWR);
     close(a_fd);
 }
@@ -230,6 +243,32 @@ void BaseTcpServer::run()
     setNonBlocking(m_sfd);
     listenInit();
     epollInit();
+    startThread();
+    joinThread();
+}
+
+void BaseTcpServer::stop()
+{
+    m_running = false;
+}
+
+void BaseTcpServer::startThread()
+{
+    unsigned int nThreads = std::thread::hardware_concurrency();
+    
+    if(nThreads == 0U) {
+        nThreads = 1U;
+    }
+    
+    for(unsigned int i = 0; i < nThreads; ++i) {
+        m_poolThreads.emplace_back(
+            std::thread([this]() { runThread(); })
+        );
+    }
+}
+
+void BaseTcpServer::runThread()
+{
     while(m_running) try {
         int n = epoll_wait(m_efd, m_events, MAXEVENTS, 500);
         if(n == -1 && errno != EINTR) {
@@ -240,7 +279,6 @@ void BaseTcpServer::run()
             const int eventfd = m_events[i].data.fd;
             if(events & (EPOLLERR | EPOLLHUP)) {
                 doClose(eventfd);
-                continue;
             } else if(events & EPOLLIN) {
                 if(eventfd == m_sfd) {
                     doAccept();
@@ -260,25 +298,63 @@ void BaseTcpServer::run()
     }
 }
 
-void BaseTcpServer::stop()
+void BaseTcpServer::joinThread()
 {
-    m_running = false;
+    for(auto &thread : m_poolThreads) {
+        if(thread.joinable()) {
+            thread.join();
+        }
+    }
+    m_poolThreads.clear();
 }
 
 void BaseTcpServer::onAccept(int a_fd)
 {
+#ifdef DEBUG
+    std::cout << "onAccept: " << a_fd << std::endl;
+#endif
+    m_context[a_fd] = std::make_shared<CtxConnection>();
 }
 
 void BaseTcpServer::onRead(int a_fd, const char *a_buf, size_t a_size)
 {
+#ifdef DEBUG
+    std::cout << "onRead: " << a_fd << ": " << a_size << std::endl;
+#endif
+    auto &ctx = m_context.at(a_fd);
+    auto &strin = ctx->m_strin;
+    auto &strout = ctx->m_strout;
+    strin.append(a_buf, a_size);
+    while(1) {
+        const size_t n = strin.find('\n');
+        if(n == std::string::npos) {
+            break;
+        }
+        strout += strin.substr(0, n + 1);
+        strin.erase(0, n + 1);
+        ctx->m_readyWrite = true;
+    }
 }
 
 void BaseTcpServer::onWrite(int a_fd, size_t a_size)
 {
+    auto &ctx = m_context.at(a_fd);
+    auto &strout = ctx->m_strout;
+#ifdef DEBUG
+    std::cout << "onWrite: " << a_fd << " : " << a_size << " : " << strout.size() << std::endl;
+#endif
+    strout.erase(0, a_size);
+    if(strout.empty()) {
+        ctx->m_readyWrite = false;
+    }
 }
 
 void BaseTcpServer::onClose(int a_fd)
 {
+#ifdef DEBUG
+    std::cout << "onClose: " << a_fd << std::endl;
+#endif
+    m_context.erase(a_fd);
 }
 
 
@@ -293,14 +369,6 @@ TcpServer::TcpServer(
 {
 }
 
-void TcpServer::onAccept(int a_fd)
-{
-#ifdef DEBUG
-    std::cout << "onAccept: " << a_fd << std::endl;
-#endif
-    m_context[a_fd] = std::make_shared<CtxConnection>();
-}
-
 void TcpServer::onRead(int a_fd, const char *a_buf, size_t a_size)
 {
 #ifdef DEBUG
@@ -311,7 +379,7 @@ void TcpServer::onRead(int a_fd, const char *a_buf, size_t a_size)
     auto &strout = ctx->m_strout;
     strin.append(a_buf, a_size);
     while(1) {
-        size_t n = strin.find('\n');
+        const size_t n = strin.find('\n');
         if(n == std::string::npos) {
             break;
         }
@@ -360,12 +428,4 @@ void TcpServer::onWrite(int a_fd, size_t a_size)
     if(strout.empty()) {
         ctx->m_readyWrite = false;
     }
-}
-
-void TcpServer::onClose(int a_fd)
-{
-#ifdef DEBUG
-    std::cout << "onClose: " << a_fd << std::endl;
-#endif
-    m_context.erase(a_fd);
 }

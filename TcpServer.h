@@ -7,6 +7,9 @@
 #include <sys/epoll.h>
 #include <memory>
 #include <string>
+#include <vector>
+#include <thread>
+#include <mutex>
 #include <map>
 #include "Sequence.h"
 
@@ -25,6 +28,7 @@ struct CtxConnection {
 
 typedef std::shared_ptr<CtxConnection>  PCtxConnection;
 typedef std::map<int, PCtxConnection>   MapCtxConnection;
+typedef std::vector<std::thread>        VectorThreads;
 
 
 /**
@@ -34,7 +38,7 @@ class BaseTcpServer
 {
     enum {
         BUFFERSIZE      = 1024,
-        MAXEVENTS       = 16384
+        MAXEVENTS       = 4096
     };
 public:
     /// Открытые методы
@@ -52,6 +56,11 @@ private:
     void                doRead(int a_fd);
     void                doWrite(int a_fd);
     void                doClose(int a_fd);
+private:
+    /// Работа с потоками выполнения
+    void                startThread();
+    void                runThread();
+    void                joinThread();
 protected:
     /// Хэндлеры событий
     virtual void        onAccept(int a_fd);
@@ -65,11 +74,12 @@ protected:
     std::string         m_address;
     std::string         m_port;
     MapCtxConnection    m_context;
-    struct epoll_event  m_event;
+    VectorThreads       m_poolThreads;
     struct epoll_event *m_events;
     int                 m_sfd;
     int                 m_efd;
     volatile bool       m_running;
+    static std::mutex   s_lock;
 };
 
 
@@ -83,10 +93,8 @@ public:
                         TcpServer(const std::string& a_addr,
                                   const std::string& a_port);
 protected:
-    virtual void        onAccept(int a_fd);
     virtual void        onRead(int a_fd, const char *a_buf, size_t a_size);
     virtual void        onWrite(int a_fd, size_t a_size);
-    virtual void        onClose(int a_fd);
 };
 
 typedef std::shared_ptr<TcpServer>  PTcpServer;

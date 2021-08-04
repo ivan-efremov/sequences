@@ -14,9 +14,11 @@ static PTcpServer g_server;
 static void stop(int a_signal)
 {
     if(g_server) {
+        std::cout << std::endl;
         g_server->stop();
     }
 }
+
 
 int main(int argc, const char *argv[])
 {
@@ -39,6 +41,6 @@ int main(int argc, const char *argv[])
     } catch(const std::exception& err) {
         std::cerr << "Server error: " << err.what() << std::endl;
     }
-    std::cout << "\nShutdown server." << std::endl;
+    std::cout << "Shutdown server." << std::endl;
     return 0;
 }
