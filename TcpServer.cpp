@@ -179,12 +179,10 @@ void BaseTcpServer::doRead(int a_fd)
     ssize_t count = read(a_fd, buf, sizeof(buf));
     if(count == -1) {
         if(errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            std::lock_guard<std::mutex> lock(s_lock);
             doClose(a_fd);
             return;
         }
     } else if(count == 0) {
-        std::lock_guard<std::mutex> lock(s_lock);
         doClose(a_fd);
         return;
     }
@@ -202,7 +200,6 @@ void BaseTcpServer::doRead(int a_fd)
 void BaseTcpServer::doWrite(int a_fd)
 {
     std::lock_guard<std::mutex> lock(s_lock);
-    struct epoll_event event;
     auto &ctx = m_context.at(a_fd);
     auto &strout = ctx->m_strout;
     if(!strout.empty()) {
@@ -219,10 +216,12 @@ void BaseTcpServer::doWrite(int a_fd)
         onWrite(a_fd, count);
     }
     if(ctx->m_readyWrite) {
+        struct epoll_event event;
         event.data.fd = a_fd;
         event.events = EPOLLIN | EPOLLOUT | EPOLLET;
         epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &event);
     } else {
+        struct epoll_event event;
         event.data.fd = a_fd;
         event.events = EPOLLIN | EPOLLET;
         epoll_ctl(m_efd, EPOLL_CTL_MOD, a_fd, &event);
@@ -231,6 +230,7 @@ void BaseTcpServer::doWrite(int a_fd)
 
 void BaseTcpServer::doClose(int a_fd)
 {
+    std::unique_lock<std::mutex> lock(s_lock, std::try_to_lock);
     onClose(a_fd);
     //epoll_ctl(m_efd, EPOLL_CTL_DEL, a_fd, nullptr);
     shutdown(a_fd, SHUT_RDWR);
